@@ -1,110 +1,54 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #include <stdio.h>
 
+#include "reliability.h"
+#include "msg.h"
+#include "battleflow.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 
-#define HOST_IP "127.0.0.1" // host peer IP
+#define SERVER_IP "127.0.0.1"
 #define PORT 6000
 #define BUFLEN 512
 
-// Function to clean up Winsock
 void cleanup(SOCKET s) {
-    if (s != INVALID_SOCKET) {
-        closesocket(s);
-    }
+    if (s != INVALID_SOCKET) closesocket(s);
     WSACleanup();
 }
 
 int main() {
     WSADATA wsaData;
-    SOCKET spectatorSocket = INVALID_SOCKET;
-    struct sockaddr_in hostAddr, fromAddr;
-    int fromAddrLen = sizeof(fromAddr);
-    char recvBuf[BUFLEN];
-    int recvLen;
-    int result;
+    SOCKET specSock = INVALID_SOCKET;
+    struct sockaddr_in serverAddr, fromAddr;
+    int fromLen = sizeof(fromAddr);
+    char buf[BUFLEN];
 
-    printf("--- UDP Spectator Peer ---\n");
+    printf("--- UDP Spectator ---\n");
+    if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) return 1;
+    specSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ZeroMemory(&serverAddr, sizeof(serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    InetPton(AF_INET, SERVER_IP, &serverAddr.sin_addr);
 
-    // 1.initialize winsock
-    result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0) {
-        printf("WSAStartup failed: %d\n", result);
-        return 1;
-    }
-    printf("Winsock initialized.\n");
+    // Send discovery or just bind and listen (simple listen)
+    bind(specSock, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
+    rl_init();
+    BattleState b; bf_init(&b);
 
-    // 2. create UDP socket
-    spectatorSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (spectatorSocket == INVALID_SOCKET) {
-        printf("socket failed with error: %d\n", WSAGetLastError());
-        cleanup(spectatorSocket);
-        return 1;
-    }
-    printf("UDP socket created.\n");
-
-    // 3. setup the host address structure
-    hostAddr.sin_family = AF_INET;
-    hostAddr.sin_port = htons(PORT);
-
-    // convert Ip string to binary form
-    result = InetPton(AF_INET, HOST_IP, &hostAddr.sin_addr);
-    if (result != 1) { 
-        printf("InetPton failed to convert IP address %s\n", HOST_IP);
-        cleanup(spectatorSocket);
-        return 1;
-    }
-
-    // 4. send the spectator request message
-    const char *requestMsg = "message_type: SPECTATOR_REQUEST";
-    printf("Sending SPECTATOR_REQUEST to %s:%d...\n", HOST_IP, PORT);
-    
-    result = sendto(spectatorSocket, 
-                    requestMsg, //pointer to the message that will be sent
-                    strlen(requestMsg), //specifies the num of bytes to send
-                    0, 
-                    (struct sockaddr*)&hostAddr, // this is the destination address cast to a sockaddr* 
-                    sizeof(hostAddr));
-
-    if (result == SOCKET_ERROR) {
-        printf("sendto failed with error: %d\n", WSAGetLastError());
-        cleanup(spectatorSocket);
-        return 1;
-    }
-    printf("Request sent successfully.\n");
-
-    // 5.simulate listening for battle updates (like battle setup messages)
-    printf("Awaiting first battle update (Host must be running and send a message)...\n");
-    // to simulate listenin, we will block and wait for one packet.
-    recvLen = recvfrom(spectatorSocket, 
-                       recvBuf, // the message
-                       BUFLEN, 
-                       0, 
-                       (struct sockaddr*)&fromAddr, // the senders address
-                       &fromAddrLen);
-
-    if (recvLen == SOCKET_ERROR) {
-        printf("recvfrom failed with error: %d\n", WSAGetLastError());
-    } else {
-        if (recvLen < BUFLEN) {
-            recvBuf[recvLen] = '\0';//ensures text is null terminated
-        } else {
-            recvBuf[BUFLEN - 1] = '\0';
+    while (1) {
+        int r = recvfrom(specSock, buf, BUFLEN, 0, (struct sockaddr*)&fromAddr, &fromLen);
+        if (r > 0) {
+            buf[r < BUFLEN ? r : BUFLEN-1] = '\0';
+            printf("[SPEC] %s\n", buf);
+            rl_handle_inbound_seq(specSock, &fromAddr, fromLen, buf);
         }
-
-        char senderIP[INET_ADDRSTRLEN];
-        InetNtop(AF_INET, &(fromAddr.sin_addr), senderIP, INET_ADDRSTRLEN);// convert senders ip back to text
-
-        printf("\n--- Battle Update Received ---\n");
-        printf("From IP: %s, Port: %d\n", senderIP, ntohs(fromAddr.sin_port));
-        printf("Message: %s\n", recvBuf);
-        printf("------------------------------\n");
+        rl_tick(specSock);
+        Sleep(50);
     }
 
-    // 6.cleanup
-    printf("\nCleaning up and shutting down...\n");
-    cleanup(spectatorSocket);
+    cleanup(specSock);
     return 0;
 }
